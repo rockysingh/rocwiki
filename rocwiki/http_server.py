@@ -193,6 +193,36 @@ DASHBOARD_HTML = """<!doctype html>
     .stat .lbl { color: var(--fg-dim); }
     .stat .k { color: var(--fg-muted); font-family: var(--font-mono); font-size: 0.78em; }
 
+    /* ── Tabs ──────────────────────────────────────────────────────────── */
+    .tabs {
+      display: flex; gap: 4px; margin: 10px 0 4px;
+      border-bottom: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+    }
+    .tab {
+      background: none; border: none; color: var(--fg-muted);
+      padding: 8px 14px 10px; cursor: pointer;
+      border-bottom: 2px solid transparent;
+      display: flex; align-items: center; gap: 8px;
+      transition: color 0.12s ease, border-color 0.12s ease;
+    }
+    .tab:hover { color: var(--fg); }
+    .tab[aria-selected="true"] {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab .badge {
+      background: var(--bg-elev); color: var(--fg-dim);
+      border-radius: 10px; padding: 1px 8px;
+      font-size: 0.72rem; font-variant-numeric: tabular-nums;
+      border: 1px solid var(--border);
+    }
+    .tab[aria-selected="true"] .badge {
+      color: var(--accent);
+      border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    }
+
     /* ── Filter bar ────────────────────────────────────────────────────── */
     .controls {
       display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
@@ -304,23 +334,15 @@ DASHBOARD_HTML = """<!doctype html>
 
     <div class="stats-strip" id="stats"><span class="stat"><span class="lbl">loading…</span></span></div>
 
+    <nav class="tabs" role="tablist" id="tabs">
+      <button class="tab" role="tab" data-table="both" aria-selected="true">All <span class="badge" id="badge-both">·</span></button>
+      <button class="tab" role="tab" data-table="knowledge" aria-selected="false">Knowledge <span class="badge" id="badge-knowledge">·</span></button>
+      <button class="tab" role="tab" data-table="short_term" aria-selected="false">Short-Term <span class="badge" id="badge-short_term">·</span></button>
+    </nav>
+
     <div class="controls">
       <input id="q" type="search" placeholder="search  (FTS5: keywords, &quot;quoted phrases&quot;, AND/OR/NOT)" autofocus>
-      <select id="table" title="table">
-        <option value="both">both</option>
-        <option value="knowledge">knowledge</option>
-        <option value="short_term">short_term</option>
-      </select>
-      <select id="kind" title="kind">
-        <option value="">all kinds</option>
-        <optgroup label="knowledge">
-          <option>domain</option><option>pattern</option><option>decision</option>
-          <option>question</option><option>person</option><option>reference</option>
-        </optgroup>
-        <optgroup label="short_term">
-          <option>pr-review</option><option>incident</option><option>ops-note</option><option>task</option>
-        </optgroup>
-      </select>
+      <select id="kind" title="kind"></select>
     </div>
 
     <div id="results"></div>
@@ -328,12 +350,17 @@ DASHBOARD_HTML = """<!doctype html>
 
   <script>
     const $q = document.getElementById('q');
-    const $tbl = document.getElementById('table');
     const $kind = document.getElementById('kind');
     const $results = document.getElementById('results');
     const $stats = document.getElementById('stats');
+    const $tabs = document.getElementById('tabs');
     const $themeBtn = document.getElementById('theme-btn');
     const THEME_KEY = 'rocwiki-theme';
+    const TAB_KEY = 'rocwiki-tab';
+
+    const KNOWLEDGE_KINDS = ['domain','pattern','decision','question','person','reference'];
+    const SHORT_TERM_KINDS = ['pr-review','incident','ops-note','task'];
+    let activeTable = localStorage.getItem(TAB_KEY) || 'both';
 
     function applyTheme(t) {
       if (t === 'light') {
@@ -362,12 +389,48 @@ DASHBOARD_HTML = """<!doctype html>
       const r = await fetch('/api/stats').then(r => r.json());
       const bits = [];
       bits.push(`<span class="stat"><span class="lbl">project</span><span class="n">${esc(r.project || '?')}</span></span>`);
+      let both = 0;
       for (const [tbl, s] of Object.entries(r.tables)) {
+        both += s.total;
+        const badge = document.getElementById('badge-' + tbl);
+        if (badge) badge.textContent = s.total;
         const kinds = Object.entries(s.by_kind).map(([k,v]) => `<span class="k">${esc(k)}:${v}</span>`).join(' ');
         bits.push(`<span class="stat"><span class="lbl">${esc(tbl)}</span><span class="n">${s.total}</span> ${kinds}</span>`);
       }
+      const badgeBoth = document.getElementById('badge-both');
+      if (badgeBoth) badgeBoth.textContent = both;
       $stats.innerHTML = bits.join('');
     }
+
+    function populateKindOptions() {
+      let options = ['<option value="">all kinds</option>'];
+      if (activeTable === 'both' || activeTable === 'knowledge') {
+        options.push('<optgroup label="knowledge">' +
+          KNOWLEDGE_KINDS.map(k => `<option>${k}</option>`).join('') + '</optgroup>');
+      }
+      if (activeTable === 'both' || activeTable === 'short_term') {
+        options.push('<optgroup label="short_term">' +
+          SHORT_TERM_KINDS.map(k => `<option>${k}</option>`).join('') + '</optgroup>');
+      }
+      const prev = $kind.value;
+      $kind.innerHTML = options.join('');
+      const still = Array.from($kind.options).some(o => o.value === prev);
+      $kind.value = still ? prev : '';
+    }
+
+    function setActiveTab(table) {
+      activeTable = table;
+      localStorage.setItem(TAB_KEY, table);
+      $tabs.querySelectorAll('.tab').forEach(b => {
+        b.setAttribute('aria-selected', String(b.dataset.table === table));
+      });
+      populateKindOptions();
+      runSearch();
+    }
+    $tabs.addEventListener('click', ev => {
+      const t = ev.target.closest('.tab');
+      if (t) setActiveTab(t.dataset.table);
+    });
 
     function renderCard(e) {
       const kindClass = 'k-' + esc(e.kind);
@@ -393,7 +456,7 @@ DASHBOARD_HTML = """<!doctype html>
 
     async function runSearch() {
       const q = $q.value.trim();
-      const t = $tbl.value;
+      const t = activeTable;
       const k = $kind.value;
       let entries = [];
       try {
@@ -425,9 +488,10 @@ DASHBOARD_HTML = """<!doctype html>
 
     let debounce;
     $q.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(runSearch, 120); });
-    $tbl.addEventListener('change', runSearch);
     $kind.addEventListener('change', runSearch);
-    renderStats().then(runSearch);
+    // initial paint: apply persisted tab (sets tab aria + fills kinds + runs search)
+    setActiveTab(activeTable);
+    renderStats();
   </script>
 </body>
 </html>"""
