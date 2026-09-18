@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS knowledge (
     refs_json     TEXT,
     status        TEXT    DEFAULT 'active',
     source_ai     TEXT,
-    source_model  TEXT
+     source_model  TEXT,
+    version       INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_kind    ON knowledge(kind);
 CREATE INDEX IF NOT EXISTS idx_knowledge_status  ON knowledge(status);
@@ -147,7 +148,8 @@ CREATE TABLE IF NOT EXISTS short_term (
     refs_json     TEXT,
     status        TEXT    DEFAULT 'active',
     source_ai     TEXT,
-    source_model  TEXT
+    source_model  TEXT,
+    version       INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_short_term_kind    ON short_term(kind);
 CREATE INDEX IF NOT EXISTS idx_short_term_status  ON short_term(status);
@@ -168,6 +170,28 @@ CREATE TRIGGER IF NOT EXISTS short_term_au AFTER UPDATE ON short_term BEGIN
     INSERT INTO short_term_fts(short_term_fts, rowid, title, body, tags) VALUES('delete', old.id, old.title, old.body, old.tags);
     INSERT INTO short_term_fts(rowid, title, body, tags)                  VALUES(new.id, new.title, new.body, new.tags);
 END;
+
+CREATE TABLE IF NOT EXISTS revisions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT    NOT NULL,
+    table_name    TEXT    NOT NULL,
+    entry_id      INTEGER NOT NULL,
+    version       INTEGER NOT NULL,
+    edit_kind     TEXT    NOT NULL,          -- insert | update | delete
+    editor_ai     TEXT,                       -- who performed THIS edit
+    editor_model  TEXT,
+    -- snapshot of the entry AT this revision
+    kind          TEXT    NOT NULL,
+    title         TEXT    NOT NULL,
+    body          TEXT    NOT NULL,
+    tags          TEXT,
+    refs_json     TEXT,
+    status        TEXT,
+    source_ai     TEXT,                       -- author baked into the entry at this rev
+    source_model  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_revisions_entry   ON revisions(table_name, entry_id, version);
+CREATE INDEX IF NOT EXISTS idx_revisions_created ON revisions(created_at);
 """
 
 
@@ -191,11 +215,68 @@ def connect(project: Optional[str] = None) -> sqlite3.Connection:
 
 
 def _ensure_columns(conn: sqlite3.Connection, table: str) -> None:
-    """Idempotent column adder for legacy DBs missing source_ai/source_model."""
+    """Idempotent column adder for legacy DBs missing source_ai/source_model/version."""
     existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
     for col in ("source_ai", "source_model"):
         if col not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+    if "version" not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+
+
+def _write_revision(
+    conn: sqlite3.Connection,
+    table: str,
+    entry: dict[str, Any],
+    edit_kind: str,
+    editor_ai: Optional[str],
+    editor_model: Optional[str],
+) -> None:
+    """Insert a revision snapshot capturing the current state of `entry`."""
+    conn.execute(
+        "INSERT INTO revisions (created_at, table_name, entry_id, version, edit_kind, "
+        "editor_ai, editor_model, kind, title, body, tags, refs_json, status, source_ai, source_model) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            _now_utc_iso(),
+            table,
+            entry["id"],
+            entry["version"],
+            edit_kind,
+            editor_ai,
+            editor_model,
+            entry["kind"],
+            entry["title"],
+            entry["body"],
+            entry.get("tags"),
+            _refs_to_json(entry.get("refs")) if entry.get("refs") else None,
+            entry.get("status"),
+            entry.get("source_ai"),
+            entry.get("source_model"),
+        ),
+    )
+
+
+def _backfill_v1_revisions(conn: sqlite3.Connection) -> int:
+    """Ensure every existing entry has at least one revision. Returns rows inserted."""
+    total = 0
+    for tbl in VALID_TABLES:
+        rows = conn.execute(
+            f"SELECT e.* FROM {tbl} e "
+            f"LEFT JOIN revisions r ON r.table_name = ? AND r.entry_id = e.id "
+            f"WHERE r.id IS NULL",
+            (tbl,),
+        ).fetchall()
+        for row in rows:
+            entry = row_to_dict(row)
+            _write_revision(
+                conn, tbl, entry,
+                edit_kind="insert",
+                editor_ai=entry.get("source_ai"),
+                editor_model=entry.get("source_model"),
+            )
+            total += 1
+    return total
 
 
 def init_schema(project: Optional[str] = None) -> None:
@@ -203,6 +284,7 @@ def init_schema(project: Optional[str] = None) -> None:
         conn.executescript(SCHEMA_SQL)
         for tbl in VALID_TABLES:
             _ensure_columns(conn, tbl)
+        _backfill_v1_revisions(conn)
         conn.commit()
 
 
@@ -369,6 +451,8 @@ def add_entry(
     status: str = "active",
     source_ai: Optional[str] = None,
     source_model: Optional[str] = None,
+    editor_ai: Optional[str] = None,
+    editor_model: Optional[str] = None,
     project: Optional[str] = None,
 ) -> dict[str, Any]:
     tbl = _validate_table(table)
@@ -380,11 +464,20 @@ def add_entry(
     with connect(project) as conn:
         _ensure_columns(conn, tbl)
         cur = conn.execute(
-            f"INSERT INTO {tbl} (created_at, updated_at, kind, title, body, tags, refs_json, status, source_ai, source_model) "
-            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO {tbl} (created_at, updated_at, kind, title, body, tags, refs_json, status, "
+            f"source_ai, source_model, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
             (now, now, kind, title, body, tags, refs_json, status, source_ai, source_model),
         )
         entry_id = cur.lastrowid
+        entry = row_to_dict(
+            conn.execute(f"SELECT * FROM {tbl} WHERE id = ?", (entry_id,)).fetchone()
+        )
+        _write_revision(
+            conn, tbl, entry,
+            edit_kind="insert",
+            editor_ai=editor_ai or source_ai,
+            editor_model=editor_model or source_model,
+        )
         conn.commit()
     return get_entry(tbl, entry_id, project=project)  # type: ignore[return-value]
 
@@ -401,6 +494,8 @@ def update_entry(
     status: Optional[str] = None,
     source_ai: Optional[str] = None,
     source_model: Optional[str] = None,
+    editor_ai: Optional[str] = None,
+    editor_model: Optional[str] = None,
     project: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     tbl = _validate_table(table)
@@ -435,24 +530,56 @@ def update_entry(
         return get_entry(tbl, entry_id, project=project)
     updates.append("updated_at = ?")
     params.append(_now_utc_iso())
-    params.append(entry_id)
+    updates.append("version = version + 1")
     with connect(project) as conn:
         _ensure_columns(conn, tbl)
-        conn.execute(f"UPDATE {tbl} SET {', '.join(updates)} WHERE id = ?", params)
+        conn.execute(
+            f"UPDATE {tbl} SET {', '.join(updates)} WHERE id = ?", (*params, entry_id)
+        )
+        updated = conn.execute(f"SELECT * FROM {tbl} WHERE id = ?", (entry_id,)).fetchone()
+        if updated is not None:
+            _write_revision(
+                conn, tbl, row_to_dict(updated),
+                edit_kind="update",
+                editor_ai=editor_ai,
+                editor_model=editor_model,
+            )
         conn.commit()
     return get_entry(tbl, entry_id, project=project)
 
 
-def delete_entry(table: str, entry_id: int, project: Optional[str] = None) -> bool:
+def delete_entry(
+    table: str,
+    entry_id: int,
+    editor_ai: Optional[str] = None,
+    editor_model: Optional[str] = None,
+    project: Optional[str] = None,
+) -> bool:
     tbl = _validate_table(table)
     with connect(project) as conn:
+        row = conn.execute(f"SELECT * FROM {tbl} WHERE id = ?", (entry_id,)).fetchone()
+        if row is None:
+            return False
+        entry = row_to_dict(row)
+        # Snapshot as the final revision, bumping version by 1 to reflect the delete.
+        entry["version"] = int(entry.get("version") or 1) + 1
+        _write_revision(
+            conn, tbl, entry,
+            edit_kind="delete",
+            editor_ai=editor_ai,
+            editor_model=editor_model,
+        )
         cur = conn.execute(f"DELETE FROM {tbl} WHERE id = ?", (entry_id,))
         conn.commit()
     return cur.rowcount > 0
 
 
 def promote_to_knowledge(
-    short_term_id: int, kind: str, project: Optional[str] = None
+    short_term_id: int,
+    kind: str,
+    editor_ai: Optional[str] = None,
+    editor_model: Optional[str] = None,
+    project: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Move a short_term entry into knowledge with a new kind. The short_term row is marked resolved."""
     _validate_kind("knowledge", kind)
@@ -469,7 +596,29 @@ def promote_to_knowledge(
         status="active",
         source_ai=src.get("source_ai"),
         source_model=src.get("source_model"),
+        editor_ai=editor_ai,
+        editor_model=editor_model,
         project=project,
     )
-    update_entry("short_term", short_term_id, status="resolved", project=project)
+    update_entry(
+        "short_term", short_term_id,
+        status="resolved",
+        editor_ai=editor_ai,
+        editor_model=editor_model,
+        project=project,
+    )
     return promoted
+
+
+def get_history(
+    table: str, entry_id: int, project: Optional[str] = None
+) -> list[dict[str, Any]]:
+    """Return all revisions for an entry, most-recent version first."""
+    tbl = _validate_table(table)
+    with connect(project) as conn:
+        rows = conn.execute(
+            "SELECT * FROM revisions WHERE table_name = ? AND entry_id = ? "
+            "ORDER BY version DESC, id DESC",
+            (tbl, entry_id),
+        ).fetchall()
+    return [row_to_dict(r) for r in rows]

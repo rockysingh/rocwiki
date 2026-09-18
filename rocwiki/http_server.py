@@ -65,6 +65,74 @@ async def route_get(request: Request) -> JSONResponse:
     return _json(entry)
 
 
+async def route_history(request: Request) -> JSONResponse:
+    table = request.path_params["table"]
+    try:
+        entry_id = int(request.path_params["entry_id"])
+    except ValueError:
+        return _json({"error": "entry_id must be an integer"}, status=400)
+    try:
+        revs = db.get_history(table=table, entry_id=entry_id, project=_project(request))
+    except ValueError as e:
+        return _json({"error": str(e)}, status=400)
+    return _json({"revisions": revs, "count": len(revs)})
+
+
+async def route_patch(request: Request) -> JSONResponse:
+    table = request.path_params["table"]
+    try:
+        entry_id = int(request.path_params["entry_id"])
+    except ValueError:
+        return _json({"error": "entry_id must be an integer"}, status=400)
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        return _json({"error": "request body must be JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return _json({"error": "request body must be a JSON object"}, status=400)
+    try:
+        entry = db.update_entry(
+            table=table, entry_id=entry_id,
+            kind=payload.get("kind"),
+            title=payload.get("title"),
+            body=payload.get("body"),
+            tags=payload.get("tags"),
+            refs=payload.get("refs"),
+            status=payload.get("status"),
+            source_ai=payload.get("source_ai"),
+            source_model=payload.get("source_model"),
+            editor_ai=payload.get("editor_ai"),
+            editor_model=payload.get("editor_model"),
+            project=_project(request),
+        )
+    except ValueError as e:
+        return _json({"error": str(e)}, status=400)
+    if entry is None:
+        return _json({"error": "not found"}, status=404)
+    return _json(entry)
+
+
+async def route_delete(request: Request) -> JSONResponse:
+    table = request.path_params["table"]
+    try:
+        entry_id = int(request.path_params["entry_id"])
+    except ValueError:
+        return _json({"error": "entry_id must be an integer"}, status=400)
+    editor_ai = request.query_params.get("editor_ai")
+    editor_model = request.query_params.get("editor_model")
+    try:
+        ok = db.delete_entry(
+            table=table, entry_id=entry_id,
+            editor_ai=editor_ai, editor_model=editor_model,
+            project=_project(request),
+        )
+    except ValueError as e:
+        return _json({"error": str(e)}, status=400)
+    if not ok:
+        return _json({"error": "not found"}, status=404)
+    return _json({"deleted": True})
+
+
 async def route_search(request: Request) -> JSONResponse:
     query = request.query_params.get("q", "")
     table = request.query_params.get("table", "both")
@@ -352,6 +420,29 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .refs .rk { color: var(--accent); }
 
+    /* history timeline */
+    .history { margin-top: 8px; font-family: var(--font-mono); font-size: 0.8rem; }
+    .history .rev {
+      display: grid;
+      grid-template-columns: 60px 110px 80px 1fr;
+      gap: 10px; align-items: baseline;
+      padding: 4px 0;
+      border-top: 1px solid var(--border);
+      color: var(--fg-muted);
+    }
+    .history .rev:first-child { border-top: none; }
+    .history .rev .v { color: var(--accent); font-weight: 600; }
+    .history .rev .when { color: var(--fg-dim); font-size: 0.85em; }
+    .history .rev .ek {
+      padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; text-align: center;
+      border: 1px solid var(--border);
+    }
+    .history .rev .ek.insert { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+    .history .rev .ek.update { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .history .rev .ek.delete { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
+    .history .rev .who { color: var(--fg-muted); }
+    .history .rev .who .m { color: var(--fg-dim); }
+
     .empty {
       color: var(--fg-dim); font-style: italic; padding: 40px; text-align: center;
       border: 1px dashed var(--border); border-radius: 8px;
@@ -512,18 +603,52 @@ DASHBOARD_HTML = """<!doctype html>
         .filter(([,v]) => v && (Array.isArray(v) ? v.length : true))
         .map(([k,v]) => `<span class="rk">${esc(k)}:</span> ${Array.isArray(v) ? v.map(esc).join(', ') : esc(v)}`)
         .join(' &nbsp;·&nbsp; ') : '';
-      return `<article class="card">
+      const src = e.source || 'knowledge';
+      const ver = e.version != null ? `v${esc(e.version)}` : '';
+      return `<article class="card" data-src="${esc(src)}" data-id="${esc(e.id)}">
         <h3>${srcChip}${kindChip}<span class="title-text">${esc(e.title)}</span>${attr}</h3>
         <div class="meta">
-          <span>id ${esc(e.id)}</span><span class="sep">·</span>
+          <span>id ${esc(e.id)}</span>${ver ? `<span class="sep">·</span><span>${ver}</span>` : ''}<span class="sep">·</span>
           <span>updated ${esc((e.updated_at||'').slice(0,10))}</span><span class="sep">·</span>
           <span>status ${esc(e.status)}</span>
           ${tags ? `<span class="sep">·</span><span class="tags">${tags}</span>` : ''}
         </div>
         <details><summary>body</summary><div class="body">${esc(e.body)}</div></details>
+        <details class="history-details"><summary>history</summary><div class="history">loading…</div></details>
         ${refs ? `<div class="refs">refs: ${refs}</div>` : ''}
       </article>`;
     }
+
+    // Lazy-load history when a card's history <details> is opened.
+    document.addEventListener('toggle', async (ev) => {
+      const el = ev.target;
+      if (!el.matches || !el.matches('.history-details')) return;
+      if (!el.open) return;
+      const card = el.closest('.card');
+      const src  = card && card.dataset.src;
+      const id   = card && card.dataset.id;
+      const box  = el.querySelector('.history');
+      if (!src || !id || !box || box.dataset.loaded === '1') return;
+      box.dataset.loaded = '1';
+      try {
+        const url = `/api/${src}/${id}/history` + projQS('?');
+        const r = await fetch(url).then(r => r.json());
+        const revs = r.revisions || [];
+        box.innerHTML = revs.length ? revs.map(rev => {
+          const who = rev.editor_ai
+            ? `${esc(rev.editor_ai)}${rev.editor_model ? ` <span class="m">${esc(rev.editor_model)}</span>` : ''}`
+            : '<span class="m">unknown</span>';
+          return `<div class="rev">
+            <span class="v">v${esc(rev.version)}</span>
+            <span class="when">${esc((rev.created_at||'').slice(0,19).replace('T',' '))}</span>
+            <span class="ek ${esc(rev.edit_kind)}">${esc(rev.edit_kind)}</span>
+            <span class="who">${who}</span>
+          </div>`;
+        }).join('') : '<div class="rev"><span class="who">no revisions</span></div>';
+      } catch (err) {
+        box.innerHTML = `<div class="rev"><span class="who">error: ${esc(err.message)}</span></div>`;
+      }
+    }, true);
 
     async function runSearch() {
       const q = $q.value.trim();
@@ -583,6 +708,9 @@ routes = [
     Route("/api/{table}", route_list),
     Route("/api/{table}", route_add, methods=["POST"]),
     Route("/api/{table}/{entry_id}", route_get),
+    Route("/api/{table}/{entry_id}", route_patch, methods=["PATCH"]),
+    Route("/api/{table}/{entry_id}", route_delete, methods=["DELETE"]),
+    Route("/api/{table}/{entry_id}/history", route_history),
 ]
 
 app = Starlette(routes=routes)

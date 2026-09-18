@@ -140,6 +140,19 @@ def wiki_projects() -> list[dict[str, Any]]:
     return db.list_projects()
 
 
+@mcp.tool
+def wiki_history(
+    table: str, entry_id: int, project: Optional[str] = None
+) -> list[dict[str, Any]]:
+    """Return the full revision history for an entry, most-recent version first.
+
+    Each revision snapshots the entry's full state at that version, plus an
+    editor_ai / editor_model attribution for who performed that particular edit.
+    edit_kind is one of 'insert' | 'update' | 'delete'.
+    """
+    return db.get_history(table=table, entry_id=entry_id, project=project)
+
+
 def run() -> None:
     """Entry point for stdio MCP mode."""
     db.init_schema()
