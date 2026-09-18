@@ -94,48 +94,237 @@ async def route_add(request: Request) -> JSONResponse:
 
 
 DASHBOARD_HTML = """<!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>RocWiki</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>rocwiki</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 24px; max-width: 1100px; margin-inline: auto; }
-    h1 { margin-top: 0; font-size: 1.4rem; }
-    h2 { font-size: 1.05rem; margin-top: 2rem; border-bottom: 1px solid #8884; padding-bottom: 4px; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-    input[type=search], select { padding: 6px 10px; font-size: 0.9rem; border-radius: 4px; border: 1px solid #8884; }
-    input[type=search] { flex: 1; min-width: 240px; }
-    .card { border: 1px solid #8884; border-radius: 6px; padding: 12px; margin: 10px 0; }
-    .card h3 { margin: 0 0 4px 0; font-size: 1rem; }
-    .meta { color: #888; font-size: 0.8rem; }
-    .kind { display: inline-block; padding: 1px 6px; background: #7773; border-radius: 3px; font-size: 0.75rem; margin-right: 6px; }
-    .body { white-space: pre-wrap; font-size: 0.9rem; margin-top: 8px; }
-    .stats { font-size: 0.85rem; color: #888; }
-    details { margin: 6px 0; }
-    summary { cursor: pointer; }
+    /* ── Theme tokens ────────────────────────────────────────────────── */
+    /* Default: Dracula (dark). Toggle to a solarised-light variant. */
+    :root {
+      --bg:            #282a36;
+      --bg-elev:       #21222c;
+      --bg-card:       #2d2f3f;
+      --bg-card-hover: #343648;
+      --fg:            #f8f8f2;
+      --fg-muted:      #a8adc8;
+      --fg-dim:        #6272a4;
+      --border:        #44475a;
+      --accent:        #bd93f9;   /* purple  */
+      --accent-2:      #ff79c6;   /* pink    */
+      --cyan:          #8be9fd;
+      --green:         #50fa7b;
+      --yellow:        #f1fa8c;
+      --orange:        #ffb86c;
+      --red:           #ff5555;
+      --link:          #8be9fd;
+      --font-sans:     ui-sans-serif, -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+      --font-mono:     "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+      --radius:        8px;
+      --shadow-card:   0 1px 0 rgba(255,255,255,0.03) inset, 0 1px 2px rgba(0,0,0,0.35);
+      color-scheme: dark;
+    }
+    :root[data-theme="light"] {
+      --bg:            #fdf6e3;
+      --bg-elev:       #eee8d5;
+      --bg-card:       #ffffff;
+      --bg-card-hover: #f5efd7;
+      --fg:            #073642;
+      --fg-muted:      #586e75;
+      --fg-dim:        #93a1a1;
+      --border:        #e0dbc8;
+      --accent:        #6c71c4;
+      --accent-2:      #d33682;
+      --cyan:          #2aa198;
+      --green:         #859900;
+      --yellow:        #b58900;
+      --orange:        #cb4b16;
+      --red:           #dc322f;
+      --link:          #268bd2;
+      --shadow-card:   0 1px 0 rgba(0,0,0,0.02) inset, 0 1px 2px rgba(0,0,0,0.08);
+      color-scheme: light;
+    }
+
+    /* ── Base ──────────────────────────────────────────────────────────── */
+    * { box-sizing: border-box; }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      font-family: var(--font-sans);
+      margin: 0;
+      min-height: 100vh;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre { font-family: var(--font-mono); font-size: 0.85em; }
+    code { background: var(--bg-elev); padding: 1px 5px; border-radius: 3px; color: var(--cyan); }
+    pre {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 12px; overflow-x: auto;
+      color: var(--fg);
+    }
+    pre code { background: none; padding: 0; color: inherit; }
+
+    /* ── Layout ────────────────────────────────────────────────────────── */
+    .app { max-width: 1180px; margin-inline: auto; padding: 20px 24px 60px; }
+    header.top {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 0 16px; border-bottom: 1px solid var(--border);
+      position: sticky; top: 0; background: var(--bg); z-index: 10;
+    }
+    header.top .brand { font-size: 1.15rem; font-weight: 600; letter-spacing: 0.02em; color: var(--accent); }
+    header.top .brand::before { content: "◆ "; color: var(--accent-2); }
+    header.top .grow { flex: 1; }
+    .icon-btn {
+      background: var(--bg-elev); border: 1px solid var(--border); color: var(--fg);
+      border-radius: 6px; padding: 6px 10px; font-family: var(--font-mono);
+      font-size: 0.8rem; cursor: pointer;
+    }
+    .icon-btn:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+
+    .stats-strip {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      padding: 12px 0; color: var(--fg-muted); font-size: 0.82rem;
+    }
+    .stat { display: flex; align-items: baseline; gap: 6px; }
+    .stat .n { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stat .lbl { color: var(--fg-dim); }
+    .stat .k { color: var(--fg-muted); font-family: var(--font-mono); font-size: 0.78em; }
+
+    /* ── Filter bar ────────────────────────────────────────────────────── */
+    .controls {
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+      padding: 14px 0 18px;
+    }
+    .controls input[type=search], .controls select {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      color: var(--fg); border-radius: 6px; padding: 8px 12px;
+      font-size: 0.9rem; font-family: var(--font-sans);
+    }
+    .controls input[type=search] {
+      flex: 1; min-width: 260px;
+      font-family: var(--font-mono);
+    }
+    .controls input[type=search]:focus,
+    .controls select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+    .controls select { cursor: pointer; }
+
+    /* ── Cards ─────────────────────────────────────────────────────────── */
+    #results { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      box-shadow: var(--shadow-card);
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .card:hover { background: var(--bg-card-hover); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+    .card h3 { margin: 0 0 6px 0; font-size: 1rem; font-weight: 600; color: var(--fg); display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    .card .title-text { flex: 1; min-width: 0; }
+
+    .chip {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 999px;
+      font-family: var(--font-mono); font-size: 0.7rem;
+      font-weight: 500; letter-spacing: 0.03em;
+      border: 1px solid var(--border);
+      background: var(--bg-elev);
+      color: var(--fg-muted);
+    }
+    /* Kind-specific chip colors */
+    .chip.k-domain     { color: var(--cyan);   border-color: color-mix(in srgb, var(--cyan) 45%, var(--border)); }
+    .chip.k-pattern    { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .chip.k-decision   { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--border)); }
+    .chip.k-question   { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); }
+    .chip.k-person     { color: var(--green);  border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+    .chip.k-reference  { color: var(--fg-muted); }
+    .chip.k-pr-review  { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--border)); }
+    .chip.k-incident   { color: var(--red);    border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
+    .chip.k-ops-note   { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); }
+    .chip.k-task       { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); }
+    /* Source chip */
+    .chip.src-knowledge  { color: var(--cyan);   border-color: color-mix(in srgb, var(--cyan) 45%, var(--border)); }
+    .chip.src-short_term { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, var(--border)); }
+
+    .meta {
+      color: var(--fg-dim); font-size: 0.78rem; font-family: var(--font-mono);
+      display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+    }
+    .meta .sep { color: var(--border); }
+    .meta .tags a {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: 3px; padding: 1px 6px; margin-right: 4px;
+      color: var(--fg-muted); text-decoration: none; font-size: 0.78em;
+    }
+
+    details { margin: 10px 0 0; }
+    details summary {
+      cursor: pointer; color: var(--fg-muted); font-size: 0.82rem;
+      list-style: none; user-select: none;
+    }
+    details summary::-webkit-details-marker { display: none; }
+    details summary::before { content: "▸ "; color: var(--accent); }
+    details[open] summary::before { content: "▾ "; }
+    details .body {
+      margin-top: 10px; padding: 10px 12px;
+      background: var(--bg-elev); border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      white-space: pre-wrap;
+      color: var(--fg);
+      font-size: 0.88rem;
+    }
+    .refs {
+      margin-top: 8px; font-size: 0.78rem; color: var(--fg-dim);
+      font-family: var(--font-mono);
+    }
+    .refs .rk { color: var(--accent); }
+
+    .empty {
+      color: var(--fg-dim); font-style: italic; padding: 40px; text-align: center;
+      border: 1px dashed var(--border); border-radius: 8px;
+    }
+
+    /* narrow */
+    @media (max-width: 640px) {
+      .app { padding: 16px; }
+      .controls input[type=search] { min-width: 100%; }
+    }
   </style>
 </head>
 <body>
-  <h1>RocWiki</h1>
-  <div class="stats" id="stats">loading stats...</div>
+  <div class="app">
+    <header class="top">
+      <div class="brand">rocwiki</div>
+      <div class="grow"></div>
+      <button class="icon-btn" id="theme-btn" title="toggle theme">☾ dark</button>
+    </header>
 
-  <div class="row" style="margin: 16px 0;">
-    <input id="q" type="search" placeholder="search...">
-    <select id="table">
-      <option value="both">both</option>
-      <option value="knowledge">knowledge</option>
-      <option value="short_term">short_term</option>
-    </select>
-    <select id="kind">
-      <option value="">all kinds</option>
-      <option>domain</option><option>pattern</option><option>decision</option>
-      <option>question</option><option>person</option><option>reference</option>
-      <option>pr-review</option><option>incident</option><option>ops-note</option><option>task</option>
-    </select>
+    <div class="stats-strip" id="stats"><span class="stat"><span class="lbl">loading…</span></span></div>
+
+    <div class="controls">
+      <input id="q" type="search" placeholder="search  (FTS5: keywords, &quot;quoted phrases&quot;, AND/OR/NOT)" autofocus>
+      <select id="table" title="table">
+        <option value="both">both</option>
+        <option value="knowledge">knowledge</option>
+        <option value="short_term">short_term</option>
+      </select>
+      <select id="kind" title="kind">
+        <option value="">all kinds</option>
+        <optgroup label="knowledge">
+          <option>domain</option><option>pattern</option><option>decision</option>
+          <option>question</option><option>person</option><option>reference</option>
+        </optgroup>
+        <optgroup label="short_term">
+          <option>pr-review</option><option>incident</option><option>ops-note</option><option>task</option>
+        </optgroup>
+      </select>
+    </div>
+
+    <div id="results"></div>
   </div>
-
-  <div id="results"></div>
 
   <script>
     const $q = document.getElementById('q');
@@ -143,25 +332,63 @@ DASHBOARD_HTML = """<!doctype html>
     const $kind = document.getElementById('kind');
     const $results = document.getElementById('results');
     const $stats = document.getElementById('stats');
+    const $themeBtn = document.getElementById('theme-btn');
+    const THEME_KEY = 'rocwiki-theme';
+
+    function applyTheme(t) {
+      if (t === 'light') {
+        document.documentElement.setAttribute('data-theme', 'light');
+        $themeBtn.textContent = '☀ light';
+      } else {
+        document.documentElement.removeAttribute('data-theme');
+        $themeBtn.textContent = '☾ dark';
+      }
+      localStorage.setItem(THEME_KEY, t);
+    }
+    (function initTheme() {
+      const saved = localStorage.getItem(THEME_KEY);
+      if (saved) return applyTheme(saved);
+      const prefersLight = matchMedia('(prefers-color-scheme: light)').matches;
+      applyTheme(prefersLight ? 'light' : 'dark');
+    })();
+    $themeBtn.addEventListener('click', () => {
+      const cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+      applyTheme(cur === 'light' ? 'dark' : 'light');
+    });
+
+    function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
     async function renderStats() {
       const r = await fetch('/api/stats').then(r => r.json());
       const bits = [];
+      bits.push(`<span class="stat"><span class="lbl">project</span><span class="n">${esc(r.project || '?')}</span></span>`);
       for (const [tbl, s] of Object.entries(r.tables)) {
-        bits.push(`${tbl}: ${s.total} (${Object.entries(s.by_kind).map(([k,v]) => k+':'+v).join(', ')})`);
+        const kinds = Object.entries(s.by_kind).map(([k,v]) => `<span class="k">${esc(k)}:${v}</span>`).join(' ');
+        bits.push(`<span class="stat"><span class="lbl">${esc(tbl)}</span><span class="n">${s.total}</span> ${kinds}</span>`);
       }
-      $stats.textContent = bits.join(' — ');
+      $stats.innerHTML = bits.join('');
     }
 
     function renderCard(e) {
-      const refs = e.refs ? Object.entries(e.refs).map(([k,v]) => `${k}: ${Array.isArray(v)?v.join(', '):v}`).join(' | ') : '';
-      const src = e.source ? `<span class="kind">${e.source}</span>` : '';
-      return `<div class="card">
-        <h3>${src}<span class="kind">${e.kind}</span>${e.title}</h3>
-        <div class="meta">id ${e.id} · updated ${e.updated_at} · status ${e.status} · tags: ${e.tags || ''}</div>
-        <details><summary>body</summary><div class="body">${(e.body||'').replace(/</g,'&lt;')}</div></details>
-        ${refs ? `<div class="meta" style="margin-top:6px">refs: ${refs}</div>` : ''}
-      </div>`;
+      const kindClass = 'k-' + esc(e.kind);
+      const srcChip = e.source ? `<span class="chip src-${esc(e.source)}">${esc(e.source)}</span>` : '';
+      const kindChip = `<span class="chip ${kindClass}">${esc(e.kind)}</span>`;
+      const tags = (e.tags || '').split(',').filter(Boolean).map(t => `<a href="#" data-tag="${esc(t.trim())}">#${esc(t.trim())}</a>`).join('');
+      const refs = e.refs ? Object.entries(e.refs)
+        .filter(([,v]) => v && (Array.isArray(v) ? v.length : true))
+        .map(([k,v]) => `<span class="rk">${esc(k)}:</span> ${Array.isArray(v) ? v.map(esc).join(', ') : esc(v)}`)
+        .join(' &nbsp;·&nbsp; ') : '';
+      return `<article class="card">
+        <h3>${srcChip}${kindChip}<span class="title-text">${esc(e.title)}</span></h3>
+        <div class="meta">
+          <span>id ${esc(e.id)}</span><span class="sep">·</span>
+          <span>updated ${esc((e.updated_at||'').slice(0,10))}</span><span class="sep">·</span>
+          <span>status ${esc(e.status)}</span>
+          ${tags ? `<span class="sep">·</span><span class="tags">${tags}</span>` : ''}
+        </div>
+        <details><summary>body</summary><div class="body">${esc(e.body)}</div></details>
+        ${refs ? `<div class="refs">refs: ${refs}</div>` : ''}
+      </article>`;
     }
 
     async function runSearch() {
@@ -169,21 +396,35 @@ DASHBOARD_HTML = """<!doctype html>
       const t = $tbl.value;
       const k = $kind.value;
       let entries = [];
-      if (q) {
-        const url = `/api/search?q=${encodeURIComponent(q)}&table=${t}&limit=50` + (k ? `&kind=${k}` : '');
-        entries = (await fetch(url).then(r=>r.json())).results || [];
-      } else {
-        const tables = t === 'both' ? ['knowledge','short_term'] : [t];
-        for (const table of tables) {
-          const url = `/api/${table}?limit=25` + (k ? `&kind=${k}` : '');
-          const r = await fetch(url).then(r=>r.json());
-          (r.entries||[]).forEach(e => { e.source = table; entries.push(e); });
+      try {
+        if (q) {
+          const url = `/api/search?q=${encodeURIComponent(q)}&table=${t}&limit=50` + (k ? `&kind=${k}` : '');
+          entries = (await fetch(url).then(r=>r.json())).results || [];
+        } else {
+          const tables = t === 'both' ? ['knowledge','short_term'] : [t];
+          for (const table of tables) {
+            const url = `/api/${table}?limit=40` + (k ? `&kind=${k}` : '');
+            const r = await fetch(url).then(r=>r.json());
+            (r.entries||[]).forEach(e => { e.source = table; entries.push(e); });
+          }
+          entries.sort((a,b) => (b.updated_at||'').localeCompare(a.updated_at||''));
         }
+      } catch (err) {
+        $results.innerHTML = `<div class="empty">error: ${esc(err.message)}</div>`;
+        return;
       }
-      $results.innerHTML = entries.length ? entries.map(renderCard).join('') : '<div class="meta">no results</div>';
+      $results.innerHTML = entries.length
+        ? entries.map(renderCard).join('')
+        : '<div class="empty">no results</div>';
+      document.querySelectorAll('.tags a').forEach(a => a.addEventListener('click', ev => {
+        ev.preventDefault();
+        $q.value = a.dataset.tag;
+        runSearch();
+      }));
     }
 
-    $q.addEventListener('input', runSearch);
+    let debounce;
+    $q.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(runSearch, 120); });
     $tbl.addEventListener('change', runSearch);
     $kind.addEventListener('change', runSearch);
     renderStats().then(runSearch);
