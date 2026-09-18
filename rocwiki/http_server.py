@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 import uvicorn
 from starlette.applications import Starlette
@@ -18,8 +18,17 @@ def _json(value: Any, status: int = 200) -> JSONResponse:
     return JSONResponse(value, status_code=status)
 
 
+def _project(request: Request) -> Optional[str]:
+    v = request.query_params.get("project")
+    return v.strip() if v and v.strip() else None
+
+
 async def route_stats(request: Request) -> JSONResponse:
-    return _json(db.stats())
+    return _json(db.stats(project=_project(request)))
+
+
+async def route_projects(request: Request) -> JSONResponse:
+    return _json({"projects": db.list_projects()})
 
 
 async def route_list(request: Request) -> JSONResponse:
@@ -32,7 +41,10 @@ async def route_list(request: Request) -> JSONResponse:
     except ValueError:
         return _json({"error": "limit and offset must be integers"}, status=400)
     try:
-        entries = db.list_entries(table=table, kind=kind, status=status, limit=limit, offset=offset)
+        entries = db.list_entries(
+            table=table, kind=kind, status=status, limit=limit, offset=offset,
+            project=_project(request),
+        )
     except ValueError as e:
         return _json({"error": str(e)}, status=400)
     return _json({"entries": entries, "count": len(entries)})
@@ -45,7 +57,7 @@ async def route_get(request: Request) -> JSONResponse:
     except ValueError:
         return _json({"error": "entry_id must be an integer"}, status=400)
     try:
-        entry = db.get_entry(table=table, entry_id=entry_id)
+        entry = db.get_entry(table=table, entry_id=entry_id, project=_project(request))
     except ValueError as e:
         return _json({"error": str(e)}, status=400)
     if entry is None:
@@ -62,7 +74,9 @@ async def route_search(request: Request) -> JSONResponse:
     except ValueError:
         return _json({"error": "limit must be an integer"}, status=400)
     try:
-        results = db.search(query=query, table=table, kind=kind, limit=limit)  # type: ignore[arg-type]
+        results = db.search(
+            query=query, table=table, kind=kind, limit=limit, project=_project(request),  # type: ignore[arg-type]
+        )
     except ValueError as e:
         return _json({"error": str(e)}, status=400)
     return _json({"results": results, "count": len(results)})
@@ -85,6 +99,9 @@ async def route_add(request: Request) -> JSONResponse:
             tags=payload.get("tags"),
             refs=payload.get("refs"),
             status=payload.get("status", "active"),
+            source_ai=payload.get("source_ai"),
+            source_model=payload.get("source_model"),
+            project=_project(request),
         )
     except KeyError as e:
         return _json({"error": f"missing required field: {e.args[0]}"}, status=400)
@@ -177,12 +194,13 @@ DASHBOARD_HTML = """<!doctype html>
     header.top .brand { font-size: 1.15rem; font-weight: 600; letter-spacing: 0.02em; color: var(--accent); }
     header.top .brand::before { content: "◆ "; color: var(--accent-2); }
     header.top .grow { flex: 1; }
-    .icon-btn {
+    .icon-btn, .project-select {
       background: var(--bg-elev); border: 1px solid var(--border); color: var(--fg);
       border-radius: 6px; padding: 6px 10px; font-family: var(--font-mono);
       font-size: 0.8rem; cursor: pointer;
     }
-    .icon-btn:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+    .icon-btn:hover, .project-select:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+    .project-select { max-width: 260px; }
 
     .stats-strip {
       display: flex; gap: 16px; flex-wrap: wrap;
@@ -264,6 +282,28 @@ DASHBOARD_HTML = """<!doctype html>
       background: var(--bg-elev);
       color: var(--fg-muted);
     }
+    /* AI attribution chip (right-side of card header) */
+    .attr {
+      display: inline-flex; align-items: center; gap: 4px;
+      margin-left: auto;
+      padding: 2px 8px; border-radius: 4px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      color: var(--fg-dim);
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+    }
+    .attr .ai    { color: var(--fg-muted); font-weight: 500; }
+    .attr .model { color: var(--fg-dim); }
+    .attr.a-claude-code, .attr.a-claude-desktop { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+    .attr.a-claude-code .ai, .attr.a-claude-desktop .ai { color: var(--accent); }
+    .attr.a-codex   { border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+    .attr.a-codex .ai { color: var(--green); }
+    .attr.a-cursor  { border-color: color-mix(in srgb, var(--cyan) 45%, var(--border)); }
+    .attr.a-cursor .ai { color: var(--cyan); }
+    .attr.a-human   { border-color: color-mix(in srgb, var(--yellow) 45%, var(--border)); }
+    .attr.a-human .ai { color: var(--yellow); }
+
     /* Kind-specific chip colors */
     .chip.k-domain     { color: var(--cyan);   border-color: color-mix(in srgb, var(--cyan) 45%, var(--border)); }
     .chip.k-pattern    { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
@@ -328,6 +368,7 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="app">
     <header class="top">
       <div class="brand">rocwiki</div>
+      <select class="project-select" id="project-select" title="project"></select>
       <div class="grow"></div>
       <button class="icon-btn" id="theme-btn" title="toggle theme">☾ dark</button>
     </header>
@@ -355,12 +396,19 @@ DASHBOARD_HTML = """<!doctype html>
     const $stats = document.getElementById('stats');
     const $tabs = document.getElementById('tabs');
     const $themeBtn = document.getElementById('theme-btn');
+    const $projSel = document.getElementById('project-select');
     const THEME_KEY = 'rocwiki-theme';
     const TAB_KEY = 'rocwiki-tab';
+    const PROJECT_KEY = 'rocwiki-project';
 
     const KNOWLEDGE_KINDS = ['domain','pattern','decision','question','person','reference'];
     const SHORT_TERM_KINDS = ['pr-review','incident','ops-note','task'];
     let activeTable = localStorage.getItem(TAB_KEY) || 'both';
+    let activeProject = localStorage.getItem(PROJECT_KEY) || '';   // '' = server default
+
+    function projQS(prefix) {
+      return activeProject ? `${prefix}project=${encodeURIComponent(activeProject)}` : '';
+    }
 
     function applyTheme(t) {
       if (t === 'light') {
@@ -386,7 +434,7 @@ DASHBOARD_HTML = """<!doctype html>
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
     async function renderStats() {
-      const r = await fetch('/api/stats').then(r => r.json());
+      const r = await fetch(`/api/stats?${projQS('')}`).then(r => r.json());
       const bits = [];
       bits.push(`<span class="stat"><span class="lbl">project</span><span class="n">${esc(r.project || '?')}</span></span>`);
       let both = 0;
@@ -401,6 +449,22 @@ DASHBOARD_HTML = """<!doctype html>
       if (badgeBoth) badgeBoth.textContent = both;
       $stats.innerHTML = bits.join('');
     }
+
+    async function renderProjectPicker() {
+      const r = await fetch('/api/projects').then(r => r.json());
+      const projects = r.projects || [];
+      const opts = [`<option value="">(server default)</option>`];
+      for (const p of projects) {
+        opts.push(`<option value="${esc(p.slug)}" ${p.slug === activeProject ? 'selected' : ''}>${esc(p.slug)}</option>`);
+      }
+      $projSel.innerHTML = opts.join('');
+    }
+    $projSel.addEventListener('change', () => {
+      activeProject = $projSel.value;
+      localStorage.setItem(PROJECT_KEY, activeProject);
+      renderStats();
+      runSearch();
+    });
 
     function populateKindOptions() {
       let options = ['<option value="">all kinds</option>'];
@@ -436,13 +500,20 @@ DASHBOARD_HTML = """<!doctype html>
       const kindClass = 'k-' + esc(e.kind);
       const srcChip = e.source ? `<span class="chip src-${esc(e.source)}">${esc(e.source)}</span>` : '';
       const kindChip = `<span class="chip ${kindClass}">${esc(e.kind)}</span>`;
+      const aiCls   = e.source_ai ? ('a-' + esc(e.source_ai)) : '';
+      const attr = (e.source_ai || e.source_model)
+        ? `<span class="attr ${aiCls}" title="${esc(e.source_ai||'')}${e.source_model?' · '+esc(e.source_model):''}">`
+          + (e.source_ai ? `<span class="ai">${esc(e.source_ai)}</span>` : '')
+          + (e.source_model ? `<span class="model">${esc(e.source_model)}</span>` : '')
+          + `</span>`
+        : '';
       const tags = (e.tags || '').split(',').filter(Boolean).map(t => `<a href="#" data-tag="${esc(t.trim())}">#${esc(t.trim())}</a>`).join('');
       const refs = e.refs ? Object.entries(e.refs)
         .filter(([,v]) => v && (Array.isArray(v) ? v.length : true))
         .map(([k,v]) => `<span class="rk">${esc(k)}:</span> ${Array.isArray(v) ? v.map(esc).join(', ') : esc(v)}`)
         .join(' &nbsp;·&nbsp; ') : '';
       return `<article class="card">
-        <h3>${srcChip}${kindChip}<span class="title-text">${esc(e.title)}</span></h3>
+        <h3>${srcChip}${kindChip}<span class="title-text">${esc(e.title)}</span>${attr}</h3>
         <div class="meta">
           <span>id ${esc(e.id)}</span><span class="sep">·</span>
           <span>updated ${esc((e.updated_at||'').slice(0,10))}</span><span class="sep">·</span>
@@ -461,12 +532,13 @@ DASHBOARD_HTML = """<!doctype html>
       let entries = [];
       try {
         if (q) {
-          const url = `/api/search?q=${encodeURIComponent(q)}&table=${t}&limit=50` + (k ? `&kind=${k}` : '');
+          const url = `/api/search?q=${encodeURIComponent(q)}&table=${t}&limit=50`
+            + (k ? `&kind=${k}` : '') + projQS('&');
           entries = (await fetch(url).then(r=>r.json())).results || [];
         } else {
           const tables = t === 'both' ? ['knowledge','short_term'] : [t];
           for (const table of tables) {
-            const url = `/api/${table}?limit=40` + (k ? `&kind=${k}` : '');
+            const url = `/api/${table}?limit=40` + (k ? `&kind=${k}` : '') + projQS('&');
             const r = await fetch(url).then(r=>r.json());
             (r.entries||[]).forEach(e => { e.source = table; entries.push(e); });
           }
@@ -489,9 +561,11 @@ DASHBOARD_HTML = """<!doctype html>
     let debounce;
     $q.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(runSearch, 120); });
     $kind.addEventListener('change', runSearch);
-    // initial paint: apply persisted tab (sets tab aria + fills kinds + runs search)
-    setActiveTab(activeTable);
-    renderStats();
+    // initial paint: populate project picker, apply persisted tab, load stats.
+    renderProjectPicker().then(() => {
+      setActiveTab(activeTable);
+      renderStats();
+    });
   </script>
 </body>
 </html>"""
@@ -504,6 +578,7 @@ async def route_index(request: Request) -> HTMLResponse:
 routes = [
     Route("/", route_index),
     Route("/api/stats", route_stats),
+    Route("/api/projects", route_projects),
     Route("/api/search", route_search),
     Route("/api/{table}", route_list),
     Route("/api/{table}", route_add, methods=["POST"]),

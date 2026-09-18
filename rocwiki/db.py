@@ -112,7 +112,9 @@ CREATE TABLE IF NOT EXISTS knowledge (
     body          TEXT    NOT NULL,
     tags          TEXT,
     refs_json     TEXT,
-    status        TEXT    DEFAULT 'active'
+    status        TEXT    DEFAULT 'active',
+    source_ai     TEXT,
+    source_model  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_kind    ON knowledge(kind);
 CREATE INDEX IF NOT EXISTS idx_knowledge_status  ON knowledge(status);
@@ -143,7 +145,9 @@ CREATE TABLE IF NOT EXISTS short_term (
     body          TEXT    NOT NULL,
     tags          TEXT,
     refs_json     TEXT,
-    status        TEXT    DEFAULT 'active'
+    status        TEXT    DEFAULT 'active',
+    source_ai     TEXT,
+    source_model  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_short_term_kind    ON short_term(kind);
 CREATE INDEX IF NOT EXISTS idx_short_term_status  ON short_term(status);
@@ -172,8 +176,11 @@ END;
 # ────────────────────────────────────────────────────────────────────────
 
 
-def connect() -> sqlite3.Connection:
-    path = db_path()
+def connect(project: Optional[str] = None) -> sqlite3.Connection:
+    if project:
+        path = project_db_path(project)
+    else:
+        path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
@@ -183,9 +190,20 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-def init_schema() -> None:
-    with connect() as conn:
+def _ensure_columns(conn: sqlite3.Connection, table: str) -> None:
+    """Idempotent column adder for legacy DBs missing source_ai/source_model."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for col in ("source_ai", "source_model"):
+        if col not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+
+
+def init_schema(project: Optional[str] = None) -> None:
+    with connect(project) as conn:
         conn.executescript(SCHEMA_SQL)
+        for tbl in VALID_TABLES:
+            _ensure_columns(conn, tbl)
+        conn.commit()
 
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -236,9 +254,9 @@ def _refs_to_json(refs: Optional[dict[str, Any]]) -> Optional[str]:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def get_entry(table: str, entry_id: int) -> Optional[dict[str, Any]]:
+def get_entry(table: str, entry_id: int, project: Optional[str] = None) -> Optional[dict[str, Any]]:
     tbl = _validate_table(table)
-    with connect() as conn:
+    with connect(project) as conn:
         row = conn.execute(f"SELECT * FROM {tbl} WHERE id = ?", (entry_id,)).fetchone()
     return row_to_dict(row) if row else None
 
@@ -249,6 +267,7 @@ def list_entries(
     status: Optional[str] = None,
     limit: int = 25,
     offset: int = 0,
+    project: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     tbl = _validate_table(table)
     where: list[str] = []
@@ -262,7 +281,7 @@ def list_entries(
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     sql = f"SELECT * FROM {tbl} {where_sql} ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     params.extend([int(limit), int(offset)])
-    with connect() as conn:
+    with connect(project) as conn:
         rows = conn.execute(sql, params).fetchall()
     return [row_to_dict(r) for r in rows]
 
@@ -272,6 +291,7 @@ def search(
     table: Literal["knowledge", "short_term", "both"] = "both",
     kind: Optional[str] = None,
     limit: int = 10,
+    project: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """FTS search across knowledge and/or short_term. Returns entries with a `source` field."""
     if not query.strip():
@@ -283,7 +303,7 @@ def search(
         tables = (_validate_table(table),)
 
     results: list[dict[str, Any]] = []
-    with connect() as conn:
+    with connect(project) as conn:
         for tbl in tables:
             fts = f"{tbl}_fts"
             sql = (
@@ -305,9 +325,9 @@ def search(
     return results[:limit]
 
 
-def stats() -> dict[str, Any]:
+def stats(project: Optional[str] = None) -> dict[str, Any]:
     out: dict[str, Any] = {"tables": {}}
-    with connect() as conn:
+    with connect(project) as conn:
         for tbl in VALID_TABLES:
             total = conn.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]
             by_kind_rows = conn.execute(
@@ -325,8 +345,12 @@ def stats() -> dict[str, Any]:
                 "by_status": {r["status"]: r["c"] for r in by_status_rows},
                 "latest_updated_at": latest,
             }
-    out["db_path"] = str(db_path())
-    out["project"] = current_project() if not os.environ.get("ROCWIKI_DB") else "(ROCWIKI_DB override)"
+    if project:
+        out["db_path"] = str(project_db_path(project))
+        out["project"] = _slugify(project)
+    else:
+        out["db_path"] = str(db_path())
+        out["project"] = current_project() if not os.environ.get("ROCWIKI_DB") else "(ROCWIKI_DB override)"
     return out
 
 
@@ -343,6 +367,9 @@ def add_entry(
     tags: Optional[str] = None,
     refs: Optional[dict[str, Any]] = None,
     status: str = "active",
+    source_ai: Optional[str] = None,
+    source_model: Optional[str] = None,
+    project: Optional[str] = None,
 ) -> dict[str, Any]:
     tbl = _validate_table(table)
     _validate_kind(tbl, kind)
@@ -350,15 +377,16 @@ def add_entry(
         raise ValueError("title and body are required")
     now = _now_utc_iso()
     refs_json = _refs_to_json(refs)
-    with connect() as conn:
+    with connect(project) as conn:
+        _ensure_columns(conn, tbl)
         cur = conn.execute(
-            f"INSERT INTO {tbl} (created_at, updated_at, kind, title, body, tags, refs_json, status) "
-            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (now, now, kind, title, body, tags, refs_json, status),
+            f"INSERT INTO {tbl} (created_at, updated_at, kind, title, body, tags, refs_json, status, source_ai, source_model) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now, now, kind, title, body, tags, refs_json, status, source_ai, source_model),
         )
         entry_id = cur.lastrowid
         conn.commit()
-    return get_entry(tbl, entry_id)  # type: ignore[return-value]
+    return get_entry(tbl, entry_id, project=project)  # type: ignore[return-value]
 
 
 def update_entry(
@@ -371,6 +399,9 @@ def update_entry(
     tags: Optional[str] = None,
     refs: Optional[dict[str, Any]] = None,
     status: Optional[str] = None,
+    source_ai: Optional[str] = None,
+    source_model: Optional[str] = None,
+    project: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     tbl = _validate_table(table)
     updates: list[str] = []
@@ -394,29 +425,38 @@ def update_entry(
     if status is not None:
         updates.append("status = ?")
         params.append(status)
+    if source_ai is not None:
+        updates.append("source_ai = ?")
+        params.append(source_ai)
+    if source_model is not None:
+        updates.append("source_model = ?")
+        params.append(source_model)
     if not updates:
-        return get_entry(tbl, entry_id)
+        return get_entry(tbl, entry_id, project=project)
     updates.append("updated_at = ?")
     params.append(_now_utc_iso())
     params.append(entry_id)
-    with connect() as conn:
+    with connect(project) as conn:
+        _ensure_columns(conn, tbl)
         conn.execute(f"UPDATE {tbl} SET {', '.join(updates)} WHERE id = ?", params)
         conn.commit()
-    return get_entry(tbl, entry_id)
+    return get_entry(tbl, entry_id, project=project)
 
 
-def delete_entry(table: str, entry_id: int) -> bool:
+def delete_entry(table: str, entry_id: int, project: Optional[str] = None) -> bool:
     tbl = _validate_table(table)
-    with connect() as conn:
+    with connect(project) as conn:
         cur = conn.execute(f"DELETE FROM {tbl} WHERE id = ?", (entry_id,))
         conn.commit()
     return cur.rowcount > 0
 
 
-def promote_to_knowledge(short_term_id: int, kind: str) -> Optional[dict[str, Any]]:
+def promote_to_knowledge(
+    short_term_id: int, kind: str, project: Optional[str] = None
+) -> Optional[dict[str, Any]]:
     """Move a short_term entry into knowledge with a new kind. The short_term row is marked resolved."""
     _validate_kind("knowledge", kind)
-    src = get_entry("short_term", short_term_id)
+    src = get_entry("short_term", short_term_id, project=project)
     if src is None:
         return None
     promoted = add_entry(
@@ -427,6 +467,9 @@ def promote_to_knowledge(short_term_id: int, kind: str) -> Optional[dict[str, An
         tags=src.get("tags"),
         refs=src.get("refs"),
         status="active",
+        source_ai=src.get("source_ai"),
+        source_model=src.get("source_model"),
+        project=project,
     )
-    update_entry("short_term", short_term_id, status="resolved")
+    update_entry("short_term", short_term_id, status="resolved", project=project)
     return promoted
